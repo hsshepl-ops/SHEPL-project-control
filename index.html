@@ -2749,7 +2749,9 @@ function fbRepaint(){clearTimeout(_fbPaint);_fbPaint=setTimeout(()=>{
 
 /* ---- boot ---- */
 window.addEventListener('firebase-ready',()=>{FB.ready=true;FB.mode='cloud';FB.projectId=(window.firebaseConfig&&window.firebaseConfig.projectId)||'';fbAuthWatch();});
-window.addEventListener('firebase-unavailable',(e)=>{FB.mode='demo';FB.err=(e&&e.detail)||'';if(!FB.booted){FB.booted=true;initLogin();}});
+window.addEventListener('firebase-unavailable',(e)=>{FB.mode='demo';FB.err=(e&&e.detail)||'';if(!FB.booted){FB.booted=true;initLogin();}
+  try{const box=fbLoginBox();box.style.borderColor='#e8d2a8';box.style.background='#fdf9f0';
+    box.innerHTML='<b style="color:#8a5a00">● Demo mode (not connected to the cloud)</b><div style="margin-top:6px;color:#6b5a3a">Data stays in this browser only. Reason: <b>'+esc_(FB.err||'Firebase did not load')+'</b></div>';}catch(x){}});
 
 function fbAuthWatch(){
   fbLoginUI();
@@ -2779,13 +2781,51 @@ function fbAuthWatch(){
     }
   });
 }
+function fbLoginBox(){
+  let box=document.getElementById('fbLoginMsg');
+  if(!box){
+    box=document.createElement('div');box.id='fbLoginMsg';
+    box.style.cssText='margin-top:12px;font-size:12px;line-height:1.6;padding:10px 12px;border:1px solid #d8e0e7;border-radius:8px;background:#f7fafc';
+    const btn=document.querySelector('#login .btn-primary');
+    if(btn&&btn.parentNode)btn.parentNode.insertBefore(box,btn.nextSibling);
+    else document.querySelector('.login-formpanel').appendChild(box);
+  }
+  return box;
+}
+function fbLoginStatus(){
+  const box=fbLoginBox();
+  box.style.borderColor='#cfe3d4';box.style.background='#f4fbf6';
+  box.innerHTML='<b style="color:#1f7a3d">● Cloud connected</b> — project <b>'+esc_(FB.projectId||'?')+'</b>'+
+    '<div style="margin-top:6px;color:#5a6b7a">This page is <b>'+esc_(location.hostname||'(local file)')+'</b>.<br>That exact text must appear in Firebase → Authentication → Settings → <b>Authorized domains</b>.</div>';
+}
+function fbLoginError(e){
+  const code=((e&&e.code)||'').replace('auth/','');
+  const host=location.hostname||'(local file)';
+  const fixes={
+    'unauthorized-domain':'This website is not on Firebase\'s allowed list. Go to Firebase → Authentication → <b>Settings</b> tab → <b>Authorized domains</b> → <b>Add domain</b> → type exactly <b>'+esc_(host)+'</b> (no https://, no folder name).',
+    'invalid-credential':'The email or the password does not match. Check for typos and CAPS LOCK. If unsure, go to Firebase → Authentication → Users, click the ⋮ next to your email and choose <b>Reset password</b>.',
+    'wrong-password':'That password is wrong. Firebase → Authentication → Users → ⋮ → <b>Reset password</b>.',
+    'user-not-found':'No user exists with that email. Create one: Firebase → Authentication → <b>Users</b> → <b>Add user</b>.',
+    'invalid-email':'That is not a valid email address — check the spelling.',
+    'missing-password':'Type your password in the second box.',
+    'operation-not-allowed':'Email/Password sign-in is switched off. Firebase → Authentication → <b>Sign-in method</b> → Email/Password → <b>Enable</b> → Save.',
+    'too-many-requests':'Too many wrong tries. Wait 5 minutes and try again, or reset the password.',
+    'network-request-failed':'No internet, or a firewall/ad-blocker is blocking Google. Try another network or switch off extensions.'
+  };
+  const box=fbLoginBox();
+  box.style.borderColor='#e6b3b3';box.style.background='#fdf5f5';
+  box.innerHTML='<b style="color:#b3261e">✕ Sign-in failed</b>'+(code?' — <span class="cell-mono">'+esc_(code)+'</span>':'')+
+    '<div style="margin-top:6px;color:#5a3a3a">'+(fixes[code]||esc_((e&&e.message)||'Unknown error'))+'</div>'+
+    '<div style="margin-top:6px;color:#7a8794;font-size:11px">This page: <b>'+esc_(host)+'</b> · project: <b>'+esc_(FB.projectId||'?')+'</b></div>';
+}
 function fbLoginUI(){
   const u=document.getElementById('loginUser');const p=document.getElementById('loginPass');
   if(u){u.value='';u.placeholder='you@shengitech.com';const l=u.previousElementSibling;if(l)l.textContent='Email address';}
-  if(p){p.value='';p.placeholder='Your password';}
+  if(p){p.value='';p.placeholder='Your password';p.onkeydown=function(ev){if(ev.key==='Enter')doLogin();};}
   const r=document.getElementById('loginRole');if(r&&r.closest('.field'))r.closest('.field').style.display='none';
   const dr=document.getElementById('demoRoles');
   if(dr)dr.innerHTML='<span style="font-size:11.5px;color:var(--mute)">Cloud mode — sign in with the email &amp; password you created in Firebase → Authentication → Users.</span>';
+  fbLoginStatus();
 }
 /* real sign-in replaces the demo one when in cloud mode */
 const _demoLogin=doLogin;
@@ -2793,9 +2833,10 @@ doLogin=async function(){
   if(FB.mode!=='cloud'){return _demoLogin();}
   const email=(document.getElementById('loginUser').value||'').trim();
   const pass=document.getElementById('loginPass').value||'';
-  if(!email||!pass){toast('Enter your email and password','warn');return;}
+  if(!email||!pass){fbLoginError({code:'auth/missing-password'});return;}
+  const box=fbLoginBox();box.style.borderColor='#d8e0e7';box.style.background='#f7fafc';box.innerHTML='<b>Signing in…</b>';
   try{await window.fb.signInWithEmailAndPassword(window.auth,email,pass);}
-  catch(e){toast('Sign-in failed: '+(e.code||e.message).replace('auth/',''),'warn');}
+  catch(e){console.error('sign-in',e);fbLoginError(e);}
 };
 const _demoLogout=logout;
 logout=function(){if(FB.mode==='cloud'&&window.auth){window.fb.signOut(window.auth);}_demoLogout();};
