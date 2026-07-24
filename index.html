@@ -2760,13 +2760,21 @@ function fbAuthWatch(){
       document.getElementById('app').style.display='none';
       document.getElementById('login').style.display='flex';return;}
     FB.email=user.email||'';
-    let profile=null;
+    let profile=null,usersEmpty=false,lookupFailed=false;
     try{
-      const snap=await window.fb.getDocs(window.fb.query(window.fb.collection(window.db,FBCOL.users),window.fb.where('uid','==',user.uid)));
-      if(!snap.empty)profile=snap.docs[0].data();
-    }catch(e){console.warn('profile lookup failed',e);}
-    if(!profile)profile={empId:'E-002',role:'admin',name:user.email};
+      const all=await window.fb.getDocs(window.fb.collection(window.db,FBCOL.users));
+      let n=0;all.forEach(d=>{n++;const v=d.data()||{};if(v.uid===user.uid||d.id===user.uid)profile=v;});
+      usersEmpty=(n===0);
+    }catch(e){console.warn('profile lookup failed',e);lookupFailed=true;}
+    if(!profile){
+      if(usersEmpty){profile={empId:'E-002',role:'admin',name:user.email,_bootstrap:true};}
+      else{profile={empId:'',role:'viewer',name:user.email,_missing:true};}
+    }
+    FB.profile=profile;
     SESSION={uid:profile.empId||'E-002',role:profile.role||'viewer',authUid:user.uid,email:user.email};
+    if(profile._missing)setTimeout(()=>{try{toast('You are signed in but not listed in the "users" collection — you have view-only access. An Admin must add your row (uid / empId / name / role).','warn');}catch(e){}},1400);
+    if(profile._bootstrap)setTimeout(()=>{try{toast('No users listed yet — you have been given Admin so you can finish setup. Add your row in the "users" collection.','warn');}catch(e){}},1400);
+    if(lookupFailed)setTimeout(()=>{try{toast('Could not read the users list — check your Firestore security rules.','warn');}catch(e){}},1400);
     try{
       fbListen();
       document.getElementById('login').style.display='none';
@@ -2999,6 +3007,13 @@ PAGES.cloud=function(){
   <div class="panel"><div class="panel-head"><h3>${ic('cfg',16)} Connection</h3></div><div class="panel-body">
     ${on?`<div class="mini-note" style="border-color:var(--ok)"><b>Cloud mode is ON.</b> Project <b>${esc_(FB.projectId||'—')}</b>. Every change you make is saved to Firestore and appears on everyone else's screen within a second.</div>`
         :`<div class="mini-note" style="border-color:var(--signal)"><b>Demo mode.</b> Data lives only in this browser tab and is not shared. To switch on the cloud, open this HTML file in a text editor, find <b>PASTE YOUR firebaseConfig HERE</b> near the bottom, and paste the config from Firebase → Project settings → Your apps.${FB.err?'<br><span class="cell-mute">Reason: '+esc_(FB.err)+'</span>':''}</div>`}
+    ${on?`<div class="mini-note" style="margin-top:10px"><b>Your account as the dashboard sees it:</b><br>
+      Email <b>${esc_(FB.email||'—')}</b> · Firebase UID <span class="cell-mono">${esc_((SESSION&&SESSION.authUid)||'—')}</span><br>
+      empId <b>${esc_((SESSION&&SESSION.uid)||'—')}</b> · role <b>${esc_((SESSION&&SESSION.role)||'—')}</b>
+      ${(FB.profile&&FB.profile._missing)?'<br><span style="color:var(--risk)">⚠ You are not listed in the <b>users</b> collection — view-only. Add a row with uid / empId / name / role.</span>':''}
+      ${(FB.profile&&FB.profile._bootstrap)?'<br><span style="color:var(--signal)">⚠ The <b>users</b> collection is empty. You have temporary Admin so you can finish setup — add your row now.</span>':''}
+      ${(SESSION&&SESSION.uid&&!EMP.some(e=>e.id===SESSION.uid))?'<br><span style="color:var(--signal)">⚠ empId <b>'+esc_(SESSION.uid)+'</b> is not one of the staff codes (E-001…E-013), so tasks assigned to staff will not match you. Use a code from System → Employee Master.</span>':''}
+    </div>`:''}
   </div></div>
   <div class="panel"><div class="panel-head"><h3>${ic('upload',16)} First-time data upload</h3></div><div class="panel-body">
     <div class="mini-note" style="margin-bottom:10px">Run this <b>once</b>, from one computer, after connecting. It copies what is currently on screen into Firestore so the cloud starts with your data. Running it again simply overwrites with what you see now.</div>
