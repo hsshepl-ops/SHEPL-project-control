@@ -397,7 +397,7 @@ const ROLES = {
 
 /* pages -> {roles allowed} ; admin+director always allowed */
 const PAGE_ACCESS = {
-  home:['*'], mywork:['*'], pdocs:['*'], projreg:['*'], director:['admin','director','coordinator','viewer'], projects:['*'], newproject:['admin','director','coordinator','pm'],
+  home:['*'], mywork:['*'], pdocs:['*'], cloud:['admin','director','coordinator'], projreg:['*'], director:['admin','director','coordinator','viewer'], projects:['*'], newproject:['admin','director','coordinator','pm'],
   handover:['admin','director','coordinator','pm'], workflow:['admin','director','coordinator','pm','depthead'],
   tasks:['*'], responsibility:['admin','director','coordinator','pm','depthead'], communication:['admin','director','coordinator'],
   documents:['admin','director','coordinator','pm','depthead','deptuser','viewer'], vdr:['admin','director','coordinator','pm','depthead','deptuser'],
@@ -629,6 +629,7 @@ const NAV = [
     ['notifications','Notifications',I.bell],['reviews','Project Reviews',I.review],['notes','Quick Notes',I.note],
   ]},
   {group:'System', items:[
+    ['cloud','Cloud & Sync',I.backup],
     ['reports','Reports & Export',I.report],['audit','Audit Log',I.audit],['bulk','Bulk Upload',I.upload],
     ['users','User Management',I.users],['rolesperm','Roles & Permissions',I.roles],
     ['wfconfig','Workflow Config',I.cfg],['ptconfig','Project-Type Config',I.cfg],
@@ -2722,8 +2723,293 @@ function globalSearch(e){
   else if(doc){go('documents');setTimeout(()=>openDoc(doc.id),100);}
   else toast('No match for "'+q+'"','warn');
 }
+/* =========================================================
+   FIREBASE CLOUD LAYER  (real-time, multi-user)
+   - If firebaseConfig is filled in  -> CLOUD MODE (shared data)
+   - If not (or offline)             -> DEMO MODE (old behaviour)
+   Nothing else in the app has to change.
+   ========================================================= */
+const FB={ready:false,mode:'demo',email:'',projectId:'',uidByEmp:{},empByUid:{},booted:false,err:''};
+const fbOn=()=>FB.ready&&!!window.db;
+const FBCOL={projects:'projects',documents:'documents',master:'projectMaster',users:'users',notifs:'notifications',audit:'audit'};
+
+/* ---- repaint without losing scroll ---- */
+let _fbPaint=null;
+function fbRepaint(){clearTimeout(_fbPaint);_fbPaint=setTimeout(()=>{
+  try{
+    if(CUR==='pdocs'&&document.getElementById('pmBody'))pdRenderRows();
+    else if(CUR==='projects'&&document.getElementById('pmBody'))pmRenderRows();
+    else if(CUR&&PAGES[CUR])go(CUR);
+    updateNotifBadge();
+  }catch(e){}
+},120);}
+
+/* ---- boot ---- */
+window.addEventListener('firebase-ready',()=>{FB.ready=true;FB.mode='cloud';FB.projectId=(window.firebaseConfig&&window.firebaseConfig.projectId)||'';fbAuthWatch();});
+window.addEventListener('firebase-unavailable',(e)=>{FB.mode='demo';FB.err=(e&&e.detail)||'';if(!FB.booted){FB.booted=true;initLogin();}});
+
+function fbAuthWatch(){
+  fbLoginUI();
+  window.fb.onAuthStateChanged(window.auth,async(user)=>{
+    if(!user){FB.email='';FB.booted=true;initLogin();
+      document.getElementById('app').style.display='none';
+      document.getElementById('login').style.display='flex';return;}
+    FB.email=user.email||'';
+    let profile=null;
+    try{
+      const snap=await window.fb.getDocs(window.fb.query(window.fb.collection(window.db,FBCOL.users),window.fb.where('uid','==',user.uid)));
+      if(!snap.empty)profile=snap.docs[0].data();
+    }catch(e){console.warn('profile lookup failed',e);}
+    if(!profile)profile={empId:'E-002',role:'admin',name:user.email};
+    SESSION={uid:profile.empId||'E-002',role:profile.role||'viewer',authUid:user.uid,email:user.email};
+    fbListen();
+    document.getElementById('login').style.display='none';
+    document.getElementById('app').style.display='flex';
+    buildNav();mountUser();go('home');
+    toast('Connected to cloud — data is shared & live');
+  });
+}
+function fbLoginUI(){
+  const u=document.getElementById('loginUser');const p=document.getElementById('loginPass');
+  if(u){u.value='';u.placeholder='you@shengitech.com';const l=u.previousElementSibling;if(l)l.textContent='Email address';}
+  if(p){p.value='';p.placeholder='Your password';}
+  const r=document.getElementById('loginRole');if(r&&r.closest('.field'))r.closest('.field').style.display='none';
+  const dr=document.getElementById('demoRoles');
+  if(dr)dr.innerHTML='<span style="font-size:11.5px;color:var(--mute)">Cloud mode — sign in with the email &amp; password you created in Firebase → Authentication → Users.</span>';
+}
+/* real sign-in replaces the demo one when in cloud mode */
+const _demoLogin=doLogin;
+doLogin=async function(){
+  if(FB.mode!=='cloud'){return _demoLogin();}
+  const email=(document.getElementById('loginUser').value||'').trim();
+  const pass=document.getElementById('loginPass').value||'';
+  if(!email||!pass){toast('Enter your email and password','warn');return;}
+  try{await window.fb.signInWithEmailAndPassword(window.auth,email,pass);}
+  catch(e){toast('Sign-in failed: '+(e.code||e.message).replace('auth/',''),'warn');}
+};
+const _demoLogout=logout;
+logout=function(){if(FB.mode==='cloud'&&window.auth){window.fb.signOut(window.auth);}_demoLogout();};
+
+/* ---- LIVE LISTENERS (the real-time part) ---- */
+let _fbUnsub=[];
+function fbListen(){
+  _fbUnsub.forEach(u=>{try{u();}catch(e){}});_fbUnsub=[];
+  const {collection,collectionGroup,onSnapshot}=window.fb;
+  const sub=(c,fn)=>_fbUnsub.push(onSnapshot(c,fn,err=>console.warn('listener',err)));
+
+  sub(collection(window.db,FBCOL.users),s=>{FB.uidByEmp={};FB.empByUid={};
+    s.forEach(d=>{const v=d.data();if(v.empId&&v.uid){FB.uidByEmp[v.empId]=v.uid;FB.empByUid[v.uid]=v.empId;}});});
+
+  sub(collection(window.db,FBCOL.projects),s=>{PROJECTS.length=0;
+    s.forEach(d=>PROJECTS.push(Object.assign({id:d.id},d.data())));fbRepaint();});
+
+  sub(collection(window.db,FBCOL.documents),s=>{
+    const keep={};PDOCS.forEach(x=>keep[x.id]=x.stages||[]);
+    PDOCS.length=0;s.forEach(d=>PDOCS.push(Object.assign({id:d.id,stages:keep[d.id]||[]},d.data(),{stages:keep[d.id]||[]})));fbRepaint();});
+
+  sub(collection(window.db,FBCOL.master),s=>{
+    const keep={};DOCITEMS.forEach(x=>keep[x.id]=x.stages||[]);
+    DOCITEMS.length=0;s.forEach(d=>DOCITEMS.push(Object.assign({id:d.id,stages:keep[d.id]||[]},d.data(),{stages:keep[d.id]||[]})));fbRepaint();});
+
+  /* every stage of every document AND every project-master row, in one listener */
+  sub(collectionGroup(window.db,'stages'),s=>{
+    const docBuf={},mstBuf={};
+    s.forEach(st=>{const parent=st.ref.parent.parent;if(!parent)return;
+      const bucket=parent.parent.id===FBCOL.documents?docBuf:mstBuf;
+      (bucket[parent.id]=bucket[parent.id]||[]).push(st.data());});
+    PDOCS.forEach(dc=>{dc.stages=(docBuf[dc.id]||[]).sort((a,b)=>a.stage-b.stage);});
+    DOCITEMS.forEach(it=>{it.stages=(mstBuf[it.id]||[]).sort((a,b)=>a.stage-b.stage);});
+    fbRepaint();});
+
+  sub(window.fb.query(collection(window.db,FBCOL.notifs),window.fb.orderBy('ts','desc'),window.fb.limit(80)),s=>{
+    NOTIFS.length=0;s.forEach(d=>NOTIFS.push(Object.assign({id:d.id},d.data())));updateNotifBadge();});
+}
+
+/* ---- WRITES ---- */
+const clean=(o)=>JSON.parse(JSON.stringify(o,(k,v)=>v===undefined?null:v));
+async function fbSaveProject(p){if(!fbOn()||!p)return;const {doc,setDoc}=window.fb;const {id,...rest}=p;await setDoc(doc(window.db,FBCOL.projects,id),clean(rest),{merge:true});}
+async function fbSaveDocument(dc){if(!fbOn()||!dc)return;const {doc,setDoc,collection}=window.fb;
+  const {id,stages,...rest}=dc;
+  await setDoc(doc(window.db,FBCOL.documents,id),clean(rest),{merge:true});
+  for(const s of (stages||[])){
+    const withUids=Object.assign({},s,{respUids:(s.resp||[]).map(e=>FB.uidByEmp[e]).filter(Boolean),respEmpIds:s.resp||[]});
+    await setDoc(doc(collection(doc(window.db,FBCOL.documents,id),'stages'),String(s.stage)),clean(withUids),{merge:true});
+  }}
+async function fbSaveMaster(it){if(!fbOn()||!it)return;const {doc,setDoc,collection}=window.fb;
+  const {id,stages,...rest}=it;
+  await setDoc(doc(window.db,FBCOL.master,id),clean(rest),{merge:true});
+  for(const s of (stages||[])){
+    const withUids=Object.assign({},s,{respUids:(s.resp||[]).map(e=>FB.uidByEmp[e]).filter(Boolean),respEmpIds:s.resp||[]});
+    await setDoc(doc(collection(doc(window.db,FBCOL.master,id),'stages'),String(s.stage)),clean(withUids),{merge:true});
+  }}
+
+/* ---- wrap the app's existing actions so they also save to the cloud ---- */
+function fbAfter(name,save,pre){const orig=window[name];if(typeof orig!=='function')return;
+  window[name]=function(){const cap=pre?pre.apply(null,arguments):null;const r=orig.apply(this,arguments);
+    if(fbOn()){const args=arguments;Promise.resolve().then(()=>save(args,cap)).catch(e=>console.warn('cloud save '+name,e));}
+    return r;};}
+function fbWireWrites(){
+  /* documents */
+  ['setCorrStatus','addCorrRemark','editStage','pdArchive'].forEach(n=>fbAfter(n,(a)=>fbSaveDocument(pdoc(a[0]))));
+  fbAfter('pdCorrCommit',(a,id)=>fbSaveDocument(pdoc(id)),()=>window._pdCorr&&window._pdCorr.id);
+  fbAfter('createDoc',()=>fbSaveDocument(PDOCS[0]));
+  /* project master */
+  ['setDocStatus','sendClarify','completeDoc','adminReply','adminReview','createNextStage','saveStageDetail','pmSaveMaster','saveMasterMeta','pmArchive'].forEach(n=>fbAfter(n,(a)=>fbSaveMaster(docItem(a[0]))));
+  fbAfter('pmAssignCommit',(a,id)=>fbSaveMaster(docItem(id)),()=>window._pmAssign&&window._pmAssign.id);
+  fbAfter('createAssignment',()=>{fbSaveMaster(DOCITEMS[0]);fbSaveProject(PROJECTS[0]);});
+  /* projects */
+  fbAfter('createProject',()=>fbSaveProject(PROJECTS[0]));
+  /* notifications + audit trail */
+  fbAfter('pushNotif',()=>{if(!NOTIFS[0])return;const {addDoc,collection,serverTimestamp}=window.fb;
+    return addDoc(collection(window.db,FBCOL.notifs),clean(Object.assign({},NOTIFS[0],{ts:serverTimestamp()})));});
+  fbAfter('pushAudit',()=>{if(!AUDIT[0])return;const {addDoc,collection,serverTimestamp}=window.fb;
+    return addDoc(collection(window.db,FBCOL.audit),clean(Object.assign({},AUDIT[0],{ts:serverTimestamp()})));});
+}
+
+/* ---- one-click first-time upload of the current data ---- */
+async function fbSeed(){
+  if(!fbOn()){toast('Not connected to the cloud','warn');return;}
+  if(!isAdmin()){toast('Only Admin/Director can upload','warn');return;}
+  const btn=document.getElementById('fbSeedBtn');if(btn){btn.disabled=true;btn.textContent='Uploading…';}
+  try{
+    for(const p of PROJECTS)await fbSaveProject(p);
+    for(const dc of PDOCS)await fbSaveDocument(dc);
+    for(const it of DOCITEMS)await fbSaveMaster(it);
+    toast('Uploaded '+PROJECTS.length+' projects, '+PDOCS.length+' documents, '+DOCITEMS.length+' master rows');
+  }catch(e){toast('Upload failed: '+e.message,'warn');}
+  if(btn){btn.disabled=false;btn.textContent='Upload current data to Firestore';}
+  go('cloud');
+}
+
+/* ---- Cloud & Sync page ---- */
+const FB_RULES=`rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function role() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    function isAdmin() { return signedIn() && role() in ['admin','director','coordinator']; }
+
+    match /users/{u}         { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /projects/{p}      { allow read: if signedIn(); allow write: if isAdmin(); }
+
+    match /documents/{d} {
+      allow read: if signedIn();
+      allow create, update, delete: if isAdmin();
+      match /stages/{s} {
+        allow read: if signedIn();
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin() ||
+          ( signedIn() && request.auth.uid in resource.data.respUids
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['status','remarks','uploads','updatedBy','updatedAt']) );
+      }
+    }
+
+    match /projectMaster/{p} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
+      match /stages/{s} {
+        allow read: if signedIn();
+        allow create, delete: if isAdmin();
+        allow update: if isAdmin() ||
+          ( signedIn() && request.auth.uid in resource.data.respUids
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['status','empRemark','uploads','updatedBy','updatedAt']) );
+      }
+    }
+
+    match /audit/{a}         { allow read: if isAdmin(); allow create: if signedIn();
+                               allow update, delete: if false; }
+    match /notifications/{n} { allow read, create, update: if signedIn(); allow delete: if false; }
+  }
+}`;
+function fbCopyRules(){const t=document.getElementById('fbRules');t.select();document.execCommand('copy');toast('Security rules copied — paste into Firestore → Rules → Publish');}
+PAGES.cloud=function(){
+  const on=FB.mode==='cloud';
+  return pageHead('Administration','Cloud & Sync','Connect this dashboard to Firebase so every user sees the same data, live.')+
+  `<div class="kpi-grid">
+    ${kpi('backup',on?'LIVE':'DEMO',on?'Cloud connected':'Local demo mode',on?'ok':'warn')}
+    ${kpi('user',on?(FB.email||'—'):'—','Signed in as',on?'ok':'mute')}
+    ${kpi('doc',PDOCS.length,'Documents loaded','info')}
+  </div>
+  <div class="panel"><div class="panel-head"><h3>${ic('cfg',16)} Connection</h3></div><div class="panel-body">
+    ${on?`<div class="mini-note" style="border-color:var(--ok)"><b>Cloud mode is ON.</b> Project <b>${esc_(FB.projectId||'—')}</b>. Every change you make is saved to Firestore and appears on everyone else's screen within a second.</div>`
+        :`<div class="mini-note" style="border-color:var(--signal)"><b>Demo mode.</b> Data lives only in this browser tab and is not shared. To switch on the cloud, open this HTML file in a text editor, find <b>PASTE YOUR firebaseConfig HERE</b> near the bottom, and paste the config from Firebase → Project settings → Your apps.${FB.err?'<br><span class="cell-mute">Reason: '+esc_(FB.err)+'</span>':''}</div>`}
+  </div></div>
+  <div class="panel"><div class="panel-head"><h3>${ic('upload',16)} First-time data upload</h3></div><div class="panel-body">
+    <div class="mini-note" style="margin-bottom:10px">Run this <b>once</b>, from one computer, after connecting. It copies what is currently on screen into Firestore so the cloud starts with your data. Running it again simply overwrites with what you see now.</div>
+    <button class="btn pri" id="fbSeedBtn" ${on&&isAdmin()?`onclick="fbSeed()"`:'disabled style="opacity:.45"'}>Upload current data to Firestore</button>
+  </div></div>
+  <div class="panel"><div class="panel-head"><h3>${ic('roles',16)} Users</h3></div><div class="panel-body">
+    <div class="mini-note">For each person: create them in <b>Firebase → Authentication → Users</b>, copy their <b>User UID</b>, then add a document in the <b>users</b> collection with fields <span class="cell-mono">uid</span>, <span class="cell-mono">empId</span> (e.g. E-005), <span class="cell-mono">name</span>, <span class="cell-mono">role</span>. Roles: ${Object.keys(ROLES).map(r=>`<span class="badge b-mute">${r}</span>`).join(' ')}</div>
+  </div></div>
+  <div class="panel"><div class="panel-head"><h3>${ic('audit',16)} Security rules</h3><span class="ph-sub">paste into Firestore → Rules → Publish</span></div><div class="panel-body">
+    <div class="mini-note" style="margin-bottom:10px;border-color:var(--risk)"><b>Do this before real data goes in.</b> Test mode lets anybody read and write everything, and it stops working after 30 days.</div>
+    <textarea id="fbRules" style="width:100%;height:230px;font-family:ui-monospace,monospace;font-size:11px" readonly>${esc_(FB_RULES)}</textarea>
+    <button class="btn sm" style="margin-top:8px" onclick="fbCopyRules()">Copy rules</button>
+  </div></div>`;
+};
+
+fbWireWrites();
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer();});
-initLogin();
+/* boot: if Firebase does not report in quickly, run in demo mode */
+setTimeout(()=>{if(!FB.booted&&!FB.ready){FB.booted=true;FB.mode='demo';initLogin();}},3500);
+if(!window.__fbAttempt){FB.booted=true;initLogin();}
+</script>
+
+<!-- ============================================================
+     FIREBASE CONNECTION
+     Your firebaseConfig is ALREADY pasted in below.
+             Nothing to edit here.
+     Upload this file to GitHub, then follow the guide.
+     Project: shepl-project-control
+     ============================================================ -->
+<script>window.__fbAttempt=true;</script>
+<script type="module">
+  /* ---------- YOUR firebaseConfig (already filled in) ---------- */
+  const firebaseConfig = {
+    apiKey:            "AIzaSyCb_mvKrsxHTIIXURYfs0nJuJG4cxnBxHY",
+    authDomain:        "shepl-project-control.firebaseapp.com",
+    projectId:         "shepl-project-control",
+    storageBucket:     "shepl-project-control.firebasestorage.app",
+    messagingSenderId: "197742393851",
+    appId:             "1:197742393851:web:dd41acc5c7c8d12b45f35e"
+  };
+  /* ------------------------------------------------------------- */
+
+  const SDK = "https://www.gstatic.com/firebasejs/11.0.0";   // use the version Firebase shows you
+
+  function fail(why){ window.dispatchEvent(new CustomEvent('firebase-unavailable',{detail:why})); }
+
+  if (String(firebaseConfig.projectId).indexOf('PASTE_') === 0) {
+    fail('firebaseConfig not filled in yet');
+  } else {
+    try {
+      const { initializeApp } = await import(SDK + "/firebase-app.js");
+      const fs = await import(SDK + "/firebase-firestore.js");
+      const au = await import(SDK + "/firebase-auth.js");
+
+      const app = initializeApp(firebaseConfig);
+      window.firebaseConfig = firebaseConfig;
+      window.db   = fs.getFirestore(app);
+      window.auth = au.getAuth(app);
+      window.fb   = {
+        collection: fs.collection, collectionGroup: fs.collectionGroup, doc: fs.doc,
+        addDoc: fs.addDoc, setDoc: fs.setDoc, updateDoc: fs.updateDoc, deleteDoc: fs.deleteDoc,
+        onSnapshot: fs.onSnapshot, query: fs.query, where: fs.where, orderBy: fs.orderBy,
+        limit: fs.limit, getDocs: fs.getDocs, runTransaction: fs.runTransaction,
+        serverTimestamp: fs.serverTimestamp,
+        signInWithEmailAndPassword: au.signInWithEmailAndPassword,
+        onAuthStateChanged: au.onAuthStateChanged, signOut: au.signOut
+      };
+      window.dispatchEvent(new Event('firebase-ready'));
+    } catch (e) {
+      fail(e && e.message ? e.message : 'could not load Firebase');
+    }
+  }
 </script>
 </body>
 </html>
