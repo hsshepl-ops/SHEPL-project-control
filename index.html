@@ -2729,7 +2729,10 @@ function globalSearch(e){
    - If not (or offline)             -> DEMO MODE (old behaviour)
    Nothing else in the app has to change.
    ========================================================= */
-const FB={ready:false,mode:'demo',email:'',projectId:'',uidByEmp:{},empByUid:{},booted:false,err:''};
+const FB={ready:false,mode:'demo',email:'',projectId:'',uidByEmp:{},empByUid:{},booted:false,err:'',hasCloudData:false,cloudEmpty:false};
+let _fbHinted=false;
+function fbEmptyHint(){if(_fbHinted)return;_fbHinted=true;
+  setTimeout(()=>{try{toast('Cloud connected but EMPTY — open System → Cloud & Sync and click "Upload current data to Firestore"');}catch(e){}},900);}
 const fbOn=()=>FB.ready&&!!window.db;
 const FBCOL={projects:'projects',documents:'documents',master:'projectMaster',users:'users',notifs:'notifications',audit:'audit'};
 
@@ -2762,11 +2765,18 @@ function fbAuthWatch(){
     }catch(e){console.warn('profile lookup failed',e);}
     if(!profile)profile={empId:'E-002',role:'admin',name:user.email};
     SESSION={uid:profile.empId||'E-002',role:profile.role||'viewer',authUid:user.uid,email:user.email};
-    fbListen();
-    document.getElementById('login').style.display='none';
-    document.getElementById('app').style.display='flex';
-    buildNav();mountUser();go('home');
-    toast('Connected to cloud — data is shared & live');
+    try{
+      fbListen();
+      document.getElementById('login').style.display='none';
+      document.getElementById('app').style.display='flex';
+      buildNav();mountUser();go('home');
+      toast('Connected to cloud — data is shared & live');
+    }catch(err){
+      console.error('cloud boot failed',err);
+      document.getElementById('app').style.display='none';
+      document.getElementById('login').style.display='flex';
+      try{toast('Could not open the dashboard: '+(err.message||err)+' — you are still signed in; try reloading','warn');}catch(e){}
+    }
   });
 }
 function fbLoginUI(){
@@ -2796,33 +2806,42 @@ function fbListen(){
   _fbUnsub.forEach(u=>{try{u();}catch(e){}});_fbUnsub=[];
   const {collection,collectionGroup,onSnapshot}=window.fb;
   const sub=(c,fn)=>_fbUnsub.push(onSnapshot(c,fn,err=>console.warn('listener',err)));
+  const rowsOf=(s)=>{const r=[];s.forEach(d=>r.push(Object.assign({id:d.id},d.data())));return r;};
 
   sub(collection(window.db,FBCOL.users),s=>{FB.uidByEmp={};FB.empByUid={};
     s.forEach(d=>{const v=d.data();if(v.empId&&v.uid){FB.uidByEmp[v.empId]=v.uid;FB.empByUid[v.uid]=v.empId;}});});
 
-  sub(collection(window.db,FBCOL.projects),s=>{PROJECTS.length=0;
-    s.forEach(d=>PROJECTS.push(Object.assign({id:d.id},d.data())));fbRepaint();});
+  sub(collection(window.db,FBCOL.projects),s=>{const rows=rowsOf(s);
+    if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;fbEmptyHint();return;}   /* cloud still empty -> keep what is on screen */
+    FB.hasCloudData=true;FB.cloudEmpty=false;
+    PROJECTS.length=0;rows.forEach(r=>PROJECTS.push(r));fbRepaint();});
 
-  sub(collection(window.db,FBCOL.documents),s=>{
+  sub(collection(window.db,FBCOL.documents),s=>{const rows=rowsOf(s);
+    if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;return;}
+    FB.hasCloudData=true;
     const keep={};PDOCS.forEach(x=>keep[x.id]=x.stages||[]);
-    PDOCS.length=0;s.forEach(d=>PDOCS.push(Object.assign({id:d.id,stages:keep[d.id]||[]},d.data(),{stages:keep[d.id]||[]})));fbRepaint();});
+    PDOCS.length=0;rows.forEach(r=>PDOCS.push(Object.assign({},r,{stages:keep[r.id]||[]})));fbRepaint();});
 
-  sub(collection(window.db,FBCOL.master),s=>{
+  sub(collection(window.db,FBCOL.master),s=>{const rows=rowsOf(s);
+    if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;return;}
+    FB.hasCloudData=true;
     const keep={};DOCITEMS.forEach(x=>keep[x.id]=x.stages||[]);
-    DOCITEMS.length=0;s.forEach(d=>DOCITEMS.push(Object.assign({id:d.id,stages:keep[d.id]||[]},d.data(),{stages:keep[d.id]||[]})));fbRepaint();});
+    DOCITEMS.length=0;rows.forEach(r=>DOCITEMS.push(Object.assign({},r,{stages:keep[r.id]||[]})));fbRepaint();});
 
   /* every stage of every document AND every project-master row, in one listener */
   sub(collectionGroup(window.db,'stages'),s=>{
-    const docBuf={},mstBuf={};
-    s.forEach(st=>{const parent=st.ref.parent.parent;if(!parent)return;
+    const docBuf={},mstBuf={};let n=0;
+    s.forEach(st=>{const parent=st.ref.parent.parent;if(!parent)return;n++;
       const bucket=parent.parent.id===FBCOL.documents?docBuf:mstBuf;
       (bucket[parent.id]=bucket[parent.id]||[]).push(st.data());});
+    if(!n&&!FB.hasCloudData)return;                                                /* keep local stages */
     PDOCS.forEach(dc=>{dc.stages=(docBuf[dc.id]||[]).sort((a,b)=>a.stage-b.stage);});
     DOCITEMS.forEach(it=>{it.stages=(mstBuf[it.id]||[]).sort((a,b)=>a.stage-b.stage);});
     fbRepaint();});
 
   sub(window.fb.query(collection(window.db,FBCOL.notifs),window.fb.orderBy('ts','desc'),window.fb.limit(80)),s=>{
-    NOTIFS.length=0;s.forEach(d=>NOTIFS.push(Object.assign({id:d.id},d.data())));updateNotifBadge();});
+    const rows=rowsOf(s);if(!rows.length)return;
+    NOTIFS.length=0;rows.forEach(r=>NOTIFS.push(r));updateNotifBadge();});
 }
 
 /* ---- WRITES ---- */
@@ -2875,6 +2894,7 @@ async function fbSeed(){
     for(const p of PROJECTS)await fbSaveProject(p);
     for(const dc of PDOCS)await fbSaveDocument(dc);
     for(const it of DOCITEMS)await fbSaveMaster(it);
+    FB.hasCloudData=true;FB.cloudEmpty=false;
     toast('Uploaded '+PROJECTS.length+' projects, '+PDOCS.length+' documents, '+DOCITEMS.length+' master rows');
   }catch(e){toast('Upload failed: '+e.message,'warn');}
   if(btn){btn.disabled=false;btn.textContent='Upload current data to Firestore';}
@@ -2941,6 +2961,7 @@ PAGES.cloud=function(){
   </div></div>
   <div class="panel"><div class="panel-head"><h3>${ic('upload',16)} First-time data upload</h3></div><div class="panel-body">
     <div class="mini-note" style="margin-bottom:10px">Run this <b>once</b>, from one computer, after connecting. It copies what is currently on screen into Firestore so the cloud starts with your data. Running it again simply overwrites with what you see now.</div>
+    ${on&&FB.cloudEmpty?`<div class="mini-note" style="margin-bottom:10px;border-color:var(--signal)"><b>Your cloud database is still empty.</b> The dashboard is showing its built-in sample data. Click the button below to send it up — after that, everyone sees the same live data.</div>`:''}
     <button class="btn pri" id="fbSeedBtn" ${on&&isAdmin()?`onclick="fbSeed()"`:'disabled style="opacity:.45"'}>Upload current data to Firestore</button>
   </div></div>
   <div class="panel"><div class="panel-head"><h3>${ic('roles',16)} Users</h3></div><div class="panel-body">
