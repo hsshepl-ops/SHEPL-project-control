@@ -2857,6 +2857,8 @@ function fbListen(){
   const sub=(c,fn)=>_fbUnsub.push(onSnapshot(c,fn,err=>console.warn('listener',err)));
   const rowsOf=(s)=>{const r=[];s.forEach(d=>r.push(Object.assign({id:d.id},d.data())));return r;};
 
+  sub(collection(window.db,FBCOL.employees),s=>{fbEmpSnapshot(rowsOf(s));});
+
   sub(collection(window.db,FBCOL.users),s=>{FB.uidByEmp={};FB.empByUid={};
     s.forEach(d=>{const v=d.data();if(v.empId&&v.uid){FB.uidByEmp[v.empId]=v.uid;FB.empByUid[v.uid]=v.empId;}});});
 
@@ -2940,11 +2942,12 @@ async function fbSeed(){
   if(!isAdmin()){toast('Only Admin/Director can upload','warn');return;}
   const btn=document.getElementById('fbSeedBtn');if(btn){btn.disabled=true;btn.textContent='Uploading…';}
   try{
+    for(const e of EMP)await fbSaveEmployee(e);
     for(const p of PROJECTS)await fbSaveProject(p);
     for(const dc of PDOCS)await fbSaveDocument(dc);
     for(const it of DOCITEMS)await fbSaveMaster(it);
     FB.hasCloudData=true;FB.cloudEmpty=false;
-    toast('Uploaded '+PROJECTS.length+' projects, '+PDOCS.length+' documents, '+DOCITEMS.length+' master rows');
+    toast('Uploaded '+EMP.length+' staff, '+PROJECTS.length+' projects, '+PDOCS.length+' documents, '+DOCITEMS.length+' master rows');
   }catch(e){toast('Upload failed: '+e.message,'warn');}
   if(btn){btn.disabled=false;btn.textContent='Upload current data to Firestore';}
   go('cloud');
@@ -2963,6 +2966,7 @@ service cloud.firestore {
 
     match /users/{u}         { allow read: if signedIn(); allow write: if isAdmin(); }
     match /projects/{p}      { allow read: if signedIn(); allow write: if isAdmin(); }
+    match /employees/{e}     { allow read: if signedIn(); allow write: if isAdmin(); }
 
     match /documents/{d} {
       allow read: if signedIn();
@@ -3028,6 +3032,92 @@ PAGES.cloud=function(){
     <textarea id="fbRules" style="width:100%;height:230px;font-family:ui-monospace,monospace;font-size:11px" readonly>${esc_(FB_RULES)}</textarea>
     <button class="btn sm" style="margin-top:8px" onclick="fbCopyRules()">Copy rules</button>
   </div></div>`;
+};
+
+/* =========================================================
+   EMPLOYEE MASTER — editable + cloud-synced
+   Staff codes are yours (SH2257, SH5565 … any format).
+   ========================================================= */
+FBCOL.employees='employees';
+
+async function fbSaveEmployee(e){if(!fbOn()||!e)return;const {doc,setDoc}=window.fb;const {id,...rest}=e;
+  await setDoc(doc(window.db,FBCOL.employees,id),clean(rest),{merge:true});}
+async function fbDeleteEmployee(id){if(!fbOn())return;const {doc,deleteDoc}=window.fb;
+  await deleteDoc(doc(window.db,FBCOL.employees,id));}
+
+/* used by fbListen (added there) */
+function fbEmpSnapshot(rows){
+  if(!rows.length&&!FB.hasCloudData)return;          /* cloud empty -> keep local roster */
+  EMP.length=0;rows.forEach(r=>EMP.push(r));
+  try{buildNav();mountUser();}catch(e){}
+  fbRepaint();
+}
+
+const empRefs=(id)=>{let n=0;
+  PDOCS.forEach(d=>d.stages.forEach(s=>{if((s.resp||[]).includes(id))n++;}));
+  DOCITEMS.forEach(i=>i.stages.forEach(s=>{if((s.resp||[]).includes(id))n++;if(s.by===id)n++;}));
+  PROJECTS.forEach(p=>{if(p.pm===id||p.pc===id)n++;});
+  return n;};
+
+function openEmp(id){
+  const e=id?EMP.find(x=>x.id===id):null;const isNew=!e;
+  openDrawer(isNew?'New employee':e.id,isNew?'Add employee':'Edit '+e.name,
+    `<div class="mini-note" style="margin-bottom:12px">${isNew
+      ? 'Use <b>your own staff code</b> — any format you like (SH2257, SH5565, VAP-014 …). This code is what links a Firebase login to this person, and what task assignment uses.'
+      : 'The staff code cannot be changed once work is assigned against it. Everything else can be edited.'}</div>
+    <div class="form-grid">
+      <div class="fg"><label>Staff code / Employee ID <span class="req">*</span></label><input id="emId" value="${e?esc_(e.id):''}" ${isNew?'placeholder="e.g. SH2257"':'readonly style="background:#f4f7f9"'}></div>
+      <div class="fg"><label>Full name <span class="req">*</span></label><input id="emName" value="${e?esc_(e.name):''}" placeholder="e.g. Hitendra Singh"></div>
+      <div class="fg"><label>Designation</label><input id="emDesig" value="${e?esc_(e.desig||''):''}" placeholder="e.g. Director — Projects"></div>
+      <div class="fg"><label>Department</label><select id="emDept">${DEPARTMENTS.map(d=>`<option ${e&&e.dept===d?'selected':''}>${d}</option>`).join('')}</select></div>
+      <div class="fg"><label>Role (permissions)</label><select id="emRole">${Object.keys(ROLES).map(r=>`<option value="${r}" ${e&&e.role===r?'selected':''}>${r} — ${esc_(ROLES[r].label||ROLES[r].name||r)}</option>`).join('')}</select></div>
+      <div class="fg"><label>Office</label><input id="emOffice" value="${e?esc_(e.office||''):''}" placeholder="Vapi / Vadodara / Mumbai / Site"></div>
+      <div class="fg"><label>Rate per hour (₹)</label><input type="number" id="emRate" value="${e?(e.rate||0):0}"></div>
+    </div>
+    ${!isNew?`<div class="mini-note" style="margin-top:12px">Referenced in <b>${empRefs(e.id)}</b> assignment(s)/record(s).</div>`:''}`,
+    `<button class="btn" onclick="closeDrawer()">Cancel</button>
+     ${!isNew?`<button class="btn" onclick="delEmp('${e.id}')">Delete</button>`:''}
+     <button class="btn pri" onclick="saveEmp(${isNew?'null':"'"+e.id+"'"})">${isNew?'Add employee':'Save changes'}</button>`);
+}
+function saveEmp(existingId){
+  const g=x=>document.getElementById(x).value;
+  const id=(existingId||g('emId')).trim();const name=g('emName').trim();
+  if(!id){toast('Staff code is required','warn');return;}
+  if(!name){toast('Name is required','warn');return;}
+  if(!existingId&&EMP.some(x=>x.id.toLowerCase()===id.toLowerCase())){toast('Staff code "'+id+'" already exists','warn');return;}
+  const rec={id,name,desig:g('emDesig'),dept:g('emDept'),role:g('emRole'),office:g('emOffice'),rate:+(g('emRate')||0)};
+  const i=EMP.findIndex(x=>x.id===id);
+  if(i>=0)EMP[i]=Object.assign(EMP[i],rec);else EMP.unshift(rec);
+  pushAudit(existingId?'Edit employee':'Add employee',id,name);
+  if(fbOn())fbSaveEmployee(rec).catch(e=>console.warn(e));
+  toast(existingId?'Employee updated':'Employee '+id+' added');
+  closeDrawer();try{buildNav();mountUser();}catch(e){}go('empmaster');
+}
+function delEmp(id){
+  const n=empRefs(id);
+  if(n>0){toast('Cannot delete — '+id+' is referenced in '+n+' record(s). Reassign that work first.','warn');return;}
+  const i=EMP.findIndex(x=>x.id===id);if(i<0)return;
+  const nm=EMP[i].name;EMP.splice(i,1);
+  pushAudit('Delete employee',id,nm);
+  if(fbOn())fbDeleteEmployee(id).catch(e=>console.warn(e));
+  toast('Employee '+id+' removed');closeDrawer();go('empmaster');
+}
+
+PAGES.empmaster=function(){
+  const admin=isAdmin();
+  const unlinked=EMP.filter(e=>!FB.uidByEmp[e.id]);
+  return pageHead('System','Employee Master','Your staff register. These codes drive task assignment, timesheets and cost — use whatever format your company uses.',
+    admin?`<button class="btn sig" onclick="openEmp(null)">${ic('emp',15)} Add employee</button>`:'')+
+  `${FB.mode==='cloud'&&admin?`<div class="mini-note" style="margin-bottom:12px">${unlinked.length?`<b>${unlinked.length}</b> of ${EMP.length} staff have no Firebase login yet. To let someone sign in: Firebase → Authentication → Add user, then add a row in the <b>users</b> collection with <span class="cell-mono">uid</span> = their Firebase UID and <span class="cell-mono">empId</span> = their staff code below.`:`All ${EMP.length} staff are linked to a Firebase login.`}</div>`:''}
+  <div class="panel">${table([
+    {h:'Staff code',r:e=>`<span class="cell-mono">${esc_(e.id)}</span>${FB.uidByEmp[e.id]?' <span class="badge b-ok" style="font-size:9px">login</span>':''}`},
+    {h:'Name',cls:'cell-strong',r:e=>esc_(e.name)},
+    {h:'Designation',r:e=>esc_(e.desig||'—')},{h:'Department',r:e=>esc_(e.dept||'—')},
+    {h:'Role',r:e=>`<span class="badge b-mute">${esc_(e.role||'—')}</span>`},
+    {h:'Office',r:e=>`<span class="badge b-mute">${esc_(e.office||'—')}</span>`},
+    {h:'Rate/hr',r:e=>can('rates')?`<span class="cell-mono">${e.rate?'₹'+e.rate:'—'}</span>`:'<span class="cell-mute">restricted</span>'},
+    ...(admin?[{h:'',r:e=>`<button class="btn sm" onclick="event.stopPropagation();openEmp('${esc_(e.id)}')">Edit</button>`}]:[]),
+  ],EMP.map(e=>({...e,__id:e.id})),{freeze:true})}</div>`;
 };
 
 fbWireWrites();
