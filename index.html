@@ -573,7 +573,11 @@ const DEMO_LOGINS = {
 };
 const emp=(id)=>EMP.find(e=>e.id===id)||{name:id,desig:''};
 const initials=(n)=>n.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
-const proj=(id)=>PROJECTS.find(p=>p.id===id)||{};
+const PROJ_DEFAULTS={name:'',client:'—',type:'A',cat:'Turnkey',pc:'E-003',pm:'E-004',start:'2026-07-13',cdue:'2026-12-31',idue:'2026-12-31',status:'In Progress',prio:'Medium',value:0,loc:'—',stage:0,pct:0,vdr:'',health:'ontrack'};
+function projFix(p){if(!p)return p;for(const k in PROJ_DEFAULTS){if(p[k]===undefined||p[k]===null)p[k]=PROJ_DEFAULTS[k];}
+  if(!PTYPES[p.type])p.type='A';return p;}
+const proj=(id)=>{const p=PROJECTS.find(p=>p.id===id);return p?projFix(p):Object.assign({id:id||'—'},PROJ_DEFAULTS);};
+const ptype=(t)=>PTYPES[t]||PTYPES['A']||{color:'#8593a3',name:'',stages:[],docs:[]};
 
 function initLogin(){
   const rs=document.getElementById('loginRole');
@@ -850,7 +854,7 @@ PAGES.director=function(){
   <div class="panel"><div class="panel-head"><h3>${ic('project',16)} All projects — live status</h3><span class="ph-sub">${PROJECTS.length} total</span></div>
     ${table([
       {h:'Project',w:'220px',cls:'wrap-txt',r:p=>`<b>${esc_(p.name)}</b><div class="cell-mute" style="font-size:11px">${p.id} · ${esc_(p.client)}</div>`},
-      {h:'Type',r:p=>`<span class="badge" style="background:${PTYPES[p.type].color}22;color:${PTYPES[p.type].color}">Type ${p.type}</span>`},
+      {h:'Type',r:p=>`<span class="badge" style="background:${ptype(p.type).color}22;color:${ptype(p.type).color}">Type ${p.type}</span>`},
       {h:'Coordinator',r:p=>av(p.pc)},{h:'Value',r:p=>`<span class="cell-mono">${fmtCr(p.value)}</span>`},
       {h:'Internal due',r:p=>fmtDate(p.idue)},
       {h:'Days left',r:p=>{const dd=daysLeft(p);return p.status==='Completed'?'<span class="badge b-ok">Done</span>':`<span class="badge ${dd<0?'b-risk':dd<=7?'b-warn':'b-ok'}">${dd<0?Math.abs(dd)+'d late':dd+'d'}</span>`}},
@@ -881,7 +885,7 @@ PAGES.projects=function(){
       {h:'Project ID',r:p=>`<b class="cell-mono">${p.id}</b>`},
       {h:'Name',cls:'wrap-txt',r:p=>`<b>${esc_(p.name)}</b><div class="cell-mute" style="font-size:11px">${esc_(p.loc)}</div>`},
       {h:'Client',r:p=>esc_(p.client)},
-      {h:'Type',r:p=>`<span class="badge" style="background:${PTYPES[p.type].color}22;color:${PTYPES[p.type].color}">Type ${p.type}</span>`},
+      {h:'Type',r:p=>`<span class="badge" style="background:${ptype(p.type).color}22;color:${ptype(p.type).color}">Type ${p.type}</span>`},
       {h:'PM',r:p=>av(p.pm)},{h:'Priority',r:p=>prioBadge(p.prio)},
       {h:'Value',r:p=>`<span class="cell-mono">${fmtCr(p.value)}</span>`},
       {h:'Progress',w:'130px',r:p=>progBar(p.pct)},{h:'Status',r:p=>statusBadge(p.status)},
@@ -889,7 +893,7 @@ PAGES.projects=function(){
   </div>`;
 };
 function openProject(id){
-  const p=proj(id);const pt=PTYPES[p.type];
+  const p=proj(id);const pt=ptype(p.type);
   const ptasks=TASKS.filter(t=>t.pid===id);const pdocs=DOCS.filter(d=>d.pid===id);const prfq=RFQS.filter(r=>r.pid===id);
   const stages=pt.stages;
   const stepper=`<div class="stepper">`+stages.map((s,i)=>`<div class="step ${i<p.stage?'done':i===p.stage?'active':''}"><div class="sdot">${i<p.stage?'✓':i+1}</div><div class="slabel">${s}</div></div>`).join('')+`</div>`;
@@ -949,7 +953,7 @@ PAGES.newproject=function(){
 function npPreview(){
   const t=document.getElementById('npType').value;const el=document.getElementById('npPreview');
   if(!t){el.innerHTML='';return;}
-  const pt=PTYPES[t];
+  const pt=ptype(t);
   el.innerHTML=`<div class="form-section-title">Auto-assigned by Type ${t}</div>
     <div class="mini-note" style="border-color:${pt.color};margin-bottom:12px">Selecting <b>${pt.name}</b> assigns the following automatically. Admin can edit these under Workflow Config.</div>
     <div class="grid-2">
@@ -1003,7 +1007,7 @@ function hoLoad(id){const p=proj(id);document.getElementById('hoVal').value=fmtC
 
 /* ---- PROJECT WORKFLOW ---- */
 PAGES.workflow=function(){
-  const f=filterState('wf');const pid=f.pid||PROJECTS[0].id;const p=proj(pid);const pt=PTYPES[p.type];
+  const f=filterState('wf');const pid=f.pid||(PROJECTS[0]&&PROJECTS[0].id);const p=proj(pid);const pt=ptype(p.type);
   const rows=pt.stages.map((s,i)=>{
     const st=i<p.stage?'Completed':i===p.stage?'In Progress':'Pending';
     const tasks=TASKS.filter(t=>t.pid===pid&&t.dept===s);
@@ -1024,7 +1028,7 @@ PAGES.workflow=function(){
     ],rows.map(r=>({...r,__id:r.i})),{})}
   </div>`;
 };
-function advanceStage(pid){const p=proj(pid);const pt=PTYPES[p.type];p.stage=Math.min(p.stage+1,pt.stages.length);p.pct=Math.round(p.stage/pt.stages.length*100);AUDIT.unshift({time:'2026-07-13 '+new Date().toTimeString().slice(0,5),user:SESSION.uid,act:'Stage move',rec:pid,detail:'Advanced to '+pt.stages[p.stage]});toast('Stage completed — '+(pt.stages[p.stage]||'closure')+' activated, owner notified');go('workflow');}
+function advanceStage(pid){const p=proj(pid);const pt=ptype(p.type);p.stage=Math.min(p.stage+1,pt.stages.length);p.pct=Math.round(p.stage/pt.stages.length*100);AUDIT.unshift({time:'2026-07-13 '+new Date().toTimeString().slice(0,5),user:SESSION.uid,act:'Stage move',rec:pid,detail:'Advanced to '+pt.stages[p.stage]});toast('Stage completed — '+(pt.stages[p.stage]||'closure')+' activated, owner notified');go('workflow');}
 /* ---- TASK MANAGEMENT ---- */
 PAGES.tasks=function(){
   const f=filterState('task');
@@ -1600,7 +1604,7 @@ PAGES.plan=function(){
   </div>
 
   <div class="panel"><div class="panel-head"><h3>4 · Project-type → workflow matrix</h3></div>${table([
-    {h:'Type',r:r=>`<span class="badge" style="background:${PTYPES[r.k].color}22;color:${PTYPES[r.k].color}">Type ${r.k}</span>`},
+    {h:'Type',r:r=>`<span class="badge" style="background:${ptype(r.k).color}22;color:${ptype(r.k).color}">Type ${r.k}</span>`},
     {h:'Stages',r:r=>`<span class="cell-mono">${PTYPES[r.k].stages.length}</span>`},
     {h:'Workflow',cls:'wrap-txt',r:r=>`<span style="font-size:11px">${PTYPES[r.k].stages.join(' → ')}</span>`},
     {h:'Docs',r:r=>`<span class="cell-mono">${PTYPES[r.k].docs.length}</span>`},
@@ -2865,7 +2869,7 @@ function fbListen(){
   sub(collection(window.db,FBCOL.projects),s=>{const rows=rowsOf(s);
     if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;fbEmptyHint();return;}   /* cloud still empty -> keep what is on screen */
     FB.hasCloudData=true;FB.cloudEmpty=false;
-    PROJECTS.length=0;rows.forEach(r=>PROJECTS.push(r));fbRepaint();});
+    PROJECTS.length=0;rows.forEach(r=>PROJECTS.push(projFix(r)));fbRepaint();});
 
   sub(collection(window.db,FBCOL.documents),s=>{const rows=rowsOf(s);
     if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;return;}
