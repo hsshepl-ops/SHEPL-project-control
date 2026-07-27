@@ -1659,7 +1659,8 @@ const PM_ELIGIBLE=()=>EMP.filter(e=>['pm','depthead','coordinator','director'].i
 const isAdmin=()=>['admin','director','coordinator'].includes(SESSION.role);
 
 const docItem=(id)=>DOCITEMS.find(x=>x.id===id);
-const curStage=(it)=>it.stages[it.stages.length-1];
+const PM_EMPTY=Object.freeze({stage:1,rev:'R0',issuePurpose:'—',resp:[],by:'',assignDate:'',deadline:'',priority:'—',status:'Not started',empRemark:'',adminRemark:'',completionDate:'',clarifications:[],uploads:[],approval:'Open',updatedBy:'',updatedAt:''});
+const curStage=(it)=>(it&&it.stages&&it.stages.length)?it.stages[it.stages.length-1]:PM_EMPTY;
 const stageOf=(it,st)=>it.stages.find(s=>s.stage===st);
 const isResp=(it)=>curStage(it).resp.includes(SESSION.uid);
 const drem=(s)=>daysBetween(today,d(s.deadline));
@@ -1918,13 +1919,13 @@ function refreshDoc(id){openDocItem(id);if(['projects','mywork','director','home
 
 /* ---------- NEW PROJECT (Rev 0 / Stage 1) ---------- */
 function availableProjects(){return PROJECTS.filter(p=>!DOCITEMS.some(it=>it.projectNo===p.id));}
-function openAssign(){
+function openAssign(prefillPno,prefillProj){const pp=prefillProj||{};
   openDrawer('New project','New Project Master row — Rev 0 / Stage 1',
     `<div class="mini-note" style="margin-bottom:12px">Enter the Project Number and Name yourself (nothing is auto-assigned). This creates the single Project Master row for that project (Rev 0 / Stage 1); if the project is new it is also added to the project list.</div>
     <div class="form-grid">
-      <div class="fg"><label>Project No. <span class="req">*</span></label><input id="asPno" list="asPnoList" placeholder="e.g. SHP-2609"><datalist id="asPnoList">${PROJECTS.map(p=>`<option value="${p.id}">${esc_(p.name)}</option>`).join('')}</datalist></div>
-      <div class="fg"><label>Project Name <span class="req">*</span></label><input id="asPname" placeholder="e.g. FRP Storage Tank Package"></div>
-      <div class="fg"><label>Client Name</label><input id="asClient" placeholder="Client name"></div>
+      <div class="fg"><label>Project No. <span class="req">*</span></label><input id="asPno" list="asPnoList" value="${prefillPno?esc_(prefillPno):''}" placeholder="e.g. SHP-2609"><datalist id="asPnoList">${PROJECTS.map(p=>`<option value="${p.id}">${esc_(p.name)}</option>`).join('')}</datalist></div>
+      <div class="fg"><label>Project Name <span class="req">*</span></label><input id="asPname" value="${pp.name?esc_(pp.name):''}" placeholder="e.g. FRP Storage Tank Package"></div>
+      <div class="fg"><label>Client Name</label><input id="asClient" value="${pp.client?esc_(pp.client):''}" placeholder="Client name"></div>
       <div class="fg"><label>Project Manager</label><select id="asPm">${PM_ELIGIBLE().map(e=>`<option value="${e.id}">${e.name}</option>`).join('')}</select></div>
       <div class="fg"><label>Discipline</label><select id="asDisc">${DISCIPLINES.map(x=>`<option>${x}</option>`).join('')}</select></div>
       <div class="fg full"><label>Document Title <span class="req">*</span></label><input id="asTitle" placeholder="e.g. Design Data Sheet — …"></div>
@@ -2081,46 +2082,51 @@ function pmMatch(it){const f=filterState('pm');const cs=curStage(it);
   if(!f.showArchived&&it.archived)return false;
   if(f.showArchived&&!it.archived)return false;
   if(f.pno&&it.projectNo!==f.pno)return false;
-  if(f.client&&!it.client.toLowerCase().includes(f.client.toLowerCase()))return false;
+  if(f.client&&!(it.client||'').toLowerCase().includes(f.client.toLowerCase()))return false;
   if(f.pm&&it.pm!==f.pm)return false;
-  if(f.resp&&!cs.resp.includes(f.resp))return false;
-  if(f.title&&!it.docTitle.toLowerCase().includes(f.title.toLowerCase()))return false;
-  if(f.num&&!it.docNumber.toLowerCase().includes(f.num.toLowerCase()))return false;
+  if(f.resp&&!(cs.resp||[]).includes(f.resp))return false;
+  if(f.title&&!(it.docTitle||'').toLowerCase().includes(f.title.toLowerCase()))return false;
+  if(f.num&&!(it.docNumber||'').toLowerCase().includes(f.num.toLowerCase()))return false;
   if(f.disc&&it.discipline!==f.disc)return false;
-  if(f.code&&!it.docCode.toLowerCase().includes(f.code.toLowerCase()))return false;
+  if(f.code&&!(it.docCode||'').toLowerCase().includes(f.code.toLowerCase()))return false;
   if(f.ip&&cs.issuePurpose!==f.ip)return false;
   if(f.rev&&cs.rev!==f.rev)return false;
   if(f.stage&&cs.stage!=f.stage)return false;
   if(f.status&&effStatus(it)!==f.status)return false;
   if(f.prio&&cs.priority!==f.prio)return false;
-  if(f.deadline&&new Date(cs.deadline)>new Date(f.deadline))return false;
+  if(f.deadline&&cs.deadline&&new Date(cs.deadline)>new Date(f.deadline))return false;
   if(f.overdue&&!isOverdue(cs))return false;
   if(f.completed&&cs.status!=='Completed')return false;
-  if(f.q){const s=(it.docTitle+it.docNumber+it.projectNo+it.docCode+it.client).toLowerCase();if(!s.includes(f.q.toLowerCase()))return false;}
+  if(f.q){const s=((it.docTitle||'')+(it.docNumber||'')+it.projectNo+(it.docCode||'')+(it.client||'')).toLowerCase();if(!s.includes(f.q.toLowerCase()))return false;}
   return true;}
-function pmFiltered(){return DOCITEMS.filter(pmMatch);}
+function pmSynthetic(p){return {id:p.id,projectNo:p.id,client:p.client||'—',pm:p.pm||'E-004',docTitle:'(awaiting first document)',docNumber:'—',discipline:'—',docCode:'—',approval:'open',archived:false,stages:[],__syn:true};}
+function pmList(){const list=DOCITEMS.slice();PROJECTS.forEach(p=>{if(!DOCITEMS.some(it=>it.projectNo===p.id))list.push(pmSynthetic(p));});return list;}
+function pmFiltered(){return pmList().filter(pmMatch);}
+function pmSetup(pno){const p=proj(pno);openAssign(pno,p);}
 
 /* ---------- row + header builders ---------- */
 function pmRowsHTML(rows){
   if(!rows.length)return `<tr><td colspan="30"><div class="empty" style="padding:40px">${ic('data',30)}<b>No projects match</b>Adjust or clear the filters.</div></td></tr>`;
-  return rows.map(it=>{const cs=curStage(it);const ov=isOverdue(cs);const closed=it.approval==='closed';const arch=it.archived;
-    let revs='';for(let i=0;i<=15;i++){const s=stageOf(it,i+1);const isc=closed&&s===cs;revs+=`<td class="pm-rev" onclick="event.stopPropagation();openDocItem('${it.id}',{stage:${i+1}})" style="cursor:pointer">${s?`<span class="rag" style="background:${stageColor(s.status,isc)}"></span><span style="font-size:9px;color:var(--mute);margin-left:3px">S${s.stage}</span>`:'<span style="color:var(--line)">—</span>'}</td>`;}
-    const acts=`<div class="pm-actbtns">`+
+  return rows.map(it=>{const cs=curStage(it);const ov=isOverdue(cs);const closed=it.approval==='closed';const arch=it.archived;const syn=it.__syn;
+    let revs='';for(let i=0;i<=15;i++){const s=stageOf(it,i+1);const isc=closed&&s===cs;revs+=`<td class="pm-rev" ${syn?'':`onclick="event.stopPropagation();openDocItem('${it.id}',{stage:${i+1}})"`} style="cursor:pointer">${s?`<span class="rag" style="background:${stageColor(s.status,isc)}"></span><span style="font-size:9px;color:var(--mute);margin-left:3px">S${s.stage}</span>`:'<span style="color:var(--line)">—</span>'}</td>`;}
+    const acts= syn
+      ? `<div class="pm-actbtns">${isAdmin()?`<button class="pm-mini sig" onclick="event.stopPropagation();pmSetup('${it.projectNo}')">Set up in Master</button>`:'<span class="cell-mute" style="font-size:10px">No master row yet</span>'}</div>`
+      : `<div class="pm-actbtns">`+
         `<button class="pm-mini" onclick="event.stopPropagation();openDocItem('${it.id}')">View</button>`+
         `${isAdmin()?`<button class="pm-mini sig" onclick="event.stopPropagation();openEditMaster('${it.id}')">Edit / Assign</button>`:''}`+
         `<button class="pm-mini" onclick="event.stopPropagation();openDocItem('${it.id}',{history:true})">History</button>`+
         `${isAdmin()?(arch?`<button class="pm-mini" onclick="event.stopPropagation();pmArchive('${it.id}',false)">Restore</button>`:`<button class="pm-mini" onclick="event.stopPropagation();pmArchive('${it.id}',true)">Archive</button>`):''}`+
       `</div>`;
-    return `<tr onclick="openDocItem('${it.id}')" style="cursor:pointer${arch?';opacity:.6':''}">`+
-      `<td class="pm-fz pm-c1"><b class="cell-mono">${it.projectNo}</b><div style="margin-top:3px">${docStatus(closed?'Approved & Closed':ov?'Overdue':cs.status)}</div><div class="cell-mute" style="font-size:9.5px;margin-top:2px">Rev ${revNum(cs.stage)} / S${cs.stage}${arch?' · <b style="color:var(--risk)">Archived</b>':''}</div>${acts}</td>`+
+    return `<tr ${syn?`onclick="pmSetup('${it.projectNo}')"`:`onclick="openDocItem('${it.id}')"`} style="cursor:pointer${arch?';opacity:.6':''}">`+
+      `<td class="pm-fz pm-c1"><b class="cell-mono">${it.projectNo}</b><div style="margin-top:3px">${docStatus(syn?'No document':(closed?'Approved & Closed':ov?'Overdue':cs.status))}</div>${syn?'':`<div class="cell-mute" style="font-size:9.5px;margin-top:2px">Rev ${revNum(cs.stage)} / S${cs.stage}${arch?' · <b style="color:var(--risk)">Archived</b>':''}</div>`}${acts}</td>`+
       `<td class="pm-fz pm-c2">${esc_(it.client)}</td>`+
       `<td class="pm-fz pm-c3">${av(it.pm)}</td>`+
-      `<td class="pm-fz pm-c4">${avs(cs.resp)}</td>`+
+      `<td class="pm-fz pm-c4">${syn?'<span class="cell-mute">—</span>':avs(cs.resp)}</td>`+
       `<td class="pm-fz pm-c5 pm-fz-last"><b>${esc_(it.docTitle)}</b></td>`+
-      `<td class="pm-num"><span class="cell-mono">${it.docNumber}</span></td>`+
-      `<td><span class="badge b-mute">${it.discipline}</span></td>`+
-      `<td><span class="cell-mono">${it.docCode}</span></td>`+
-      `<td><span class="badge ${cs.issuePurpose==='IFA'?'b-info':'b-purple'}">${cs.issuePurpose}</span></td>`+
+      `<td class="pm-num"><span class="cell-mono">${esc_(it.docNumber)}</span></td>`+
+      `<td><span class="badge b-mute">${esc_(it.discipline)}</span></td>`+
+      `<td><span class="cell-mono">${esc_(it.docCode)}</span></td>`+
+      `<td>${syn?'<span class="cell-mute">—</span>':`<span class="badge ${cs.issuePurpose==='IFA'?'b-info':'b-purple'}">${cs.issuePurpose}</span>`}</td>`+
       revs+
     `</tr>`;}).join('');
 }
@@ -2582,7 +2588,7 @@ function openAddDoc(preselect){
 function createDoc(){const g=x=>document.getElementById(x).value;const pno=g('adPno');const num=g('adNum').trim();const title=g('adTitle').trim();
   if(!title){toast('Document Title is required','warn');return;}
   if(!num){toast('Document Number is required','warn');return;}
-  const dup=PDOCS.find(d=>d.docNumber.toLowerCase()===num.toLowerCase());
+  const dup=PDOCS.find(d=>(d.docNumber||'').toLowerCase()===num.toLowerCase());
   if(dup){toast('Document Number "'+num+'" already exists (in '+dup.projectNo+'). Enter a different, unique number.','warn');return;}
   const dc=mkDoc(nextDocId(),pno,num,title,g('adDisc'),g('adCode')||'DOC',[]);
   PDOCS.unshift(dc);
@@ -2886,7 +2892,7 @@ function fbListen(){
     FB.hasCloudData=true;FB.cloudEmpty=false;
     PROJECTS.length=0;rows.forEach(r=>PROJECTS.push(projFix(r)));fbRepaint();});
 
-  sub(collection(window.db,FBCOL.documents),s=>{const rows=rowsOf(s);
+  sub(collection(window.db,FBCOL.documents),s=>{const rows=rowsOf(s).filter(r=>r.docNumber&&r.projectNo);
     if(!rows.length&&!FB.hasCloudData){FB.cloudEmpty=true;return;}
     FB.hasCloudData=true;
     const keep={};PDOCS.forEach(x=>keep[x.id]=x.stages||[]);
